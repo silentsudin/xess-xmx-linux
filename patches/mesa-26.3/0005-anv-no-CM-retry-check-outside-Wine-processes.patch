@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: silentsudin <25103587+silentsudin@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 00:24:16 +0000
+Subject: [PATCH] anv: no CM retry check outside Wine processes
+
+anv_cm_retry_failed() runs at every vkCreateDevice. With the patched
+driver installed system-wide, programs that are neither Wine processes
+nor given ANV_CM_SPV_DIR (the compositor, desktop apps) would each log
+"ANV CM: neither ANV_CM_SPV_DIR nor WINEPREFIX is set". Return early
+for them; Wine processes behave as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/intel/vulkan/anv_shader_compile.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/intel/vulkan/anv_shader_compile.c b/src/intel/vulkan/anv_shader_compile.c
+index 1595a19..dd82e4d 100644
+--- a/src/intel/vulkan/anv_shader_compile.c
++++ b/src/intel/vulkan/anv_shader_compile.c
+@@ -1425,6 +1425,10 @@ void
+ anv_cm_retry_failed(struct anv_device *device)
+ {
+    char sdir[512], mark[600];
++   /* Not a Wine process and no shim folder given: nothing to retry. Return before anv_cm_spv_dir(), which would print
++    * its warning for every Vulkan program on a system-wide install (compositor, desktop). */
++   if (!getenv("ANV_CM_SPV_DIR") && !getenv("WINEPREFIX"))
++      return;
+    if (!anv_cm_spv_dir(sdir, sizeof(sdir)))
+       return;
+    snprintf(mark, sizeof(mark), "%s/compile_failed.txt", sdir);
