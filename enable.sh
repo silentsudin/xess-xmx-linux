@@ -17,11 +17,13 @@ PFXROOT="${XMX_PREFIX:-${WUWA_PREFIX:-}}"
 # the prefix in whichever Steam library holds the game (SD card, second disk)
 [ -z "$PFXROOT" ] && [ -n "$APPID" ] && PFXROOT="$(steam_prefix_of "$APPID" || printf '%s' "${STEAM_DIR:-$HOME/.local/share/Steam}/steamapps/compatdata/$APPID/pfx")"
 [ -n "$PFXROOT" ] || { echo "Set XMX_APPID=<Steam app id> or XMX_PREFIX=<prefix folder>."; exit 1; }
-PFX="$PFXROOT/drive_c/windows/system32/driverstore/filerepository/igd_faux.inf_1"
+. "$ROOT/tools/system-anv.sh"
+SYSTEM_ANV=$(xmx_system_anv || true)
+PFX=$(xmx_driverstore_for "$PFXROOT")
 CONF="${XMX_CONF:-$HOME/.config/xess-xmx.conf}"
 GAME="${XMX_GAME:-}"
 [ -d "$PFXROOT/drive_c" ] || { echo "Proton prefix not found ($PFXROOT). Start the game once first."; exit 1; }
-for f in "$ROOT/igdext64.dll" "$ROOT/lib/libvulkan_intel.so" "$ROOT/tools/cm-compile.sh"; do
+for f in "$ROOT/igdext64.dll" "${SYSTEM_ANV:-$ROOT/lib/libvulkan_intel.so}" "$ROOT/tools/cm-compile.sh"; do
   [ -f "$f" ] || { echo "missing $f - this is the source tree; download the release archive or build the binaries first (see README)"; exit 1; }
 done
 [ -x "$(ls "$ROOT"/igc/neo/bin/ocloc* 2>/dev/null | head -1)" ] || echo "note: no compiler bundle yet - run $ROOT/tools/get-igc.sh (kernels are compiled at run time)"
@@ -40,6 +42,12 @@ rm -f "$PFXROOT/drive_c/igdext_kernels/compile_failed.txt"
 
 # 2. driver: ICD json with an absolute library path; every non-Intel driver stays visible
 mkdir -p "$ROOT/run" "$ROOT/kernels"
+mkdir -p "$(dirname "$CONF")"; touch "$CONF"
+sed -i '/# >>> XESS-XMX >>>/,/# <<< XESS-XMX <<</d' "$CONF"
+if [ -n "$SYSTEM_ANV" ]; then
+  # system mode (tools/system-anv.sh): the system ANV has the patches, only the compiler / vkd3d-proton settings
+  { echo "# >>> XESS-XMX >>>"; xmx_system_env "$ROOT" | sed 's/^/export /'; echo "# <<< XESS-XMX <<<"; } >> "$CONF"
+else
 cat > "$ROOT/run/intel_icd.json" <<EOF
 { "ICD": { "api_version": "1.4.348", "library_arch": "64", "library_path": "$ROOT/lib/libvulkan_intel.so" }, "file_format_version": "1.0.1" }
 EOF
@@ -51,8 +59,6 @@ for d in /usr/share/vulkan/icd.d /usr/local/share/vulkan/icd.d /etc/vulkan/icd.d
     drivers="$drivers:$j"
   done
 done
-mkdir -p "$(dirname "$CONF")"; touch "$CONF"
-sed -i '/# >>> XESS-XMX >>>/,/# <<< XESS-XMX <<</d' "$CONF"
 cat >> "$CONF" <<EOF
 # >>> XESS-XMX >>>
 export VK_DRIVER_FILES=$drivers
@@ -62,6 +68,7 @@ export ANV_CM_HELPER=$ROOT/tools/cm-compile.sh
 export force_vk_vendor=0
 # <<< XESS-XMX <<<
 EOF
+fi
 
 # 3. the driver check; it also copies the host libraries the Steam Linux Runtime lacks into lib/deps
 bash "$ROOT/tools/session-check.sh" --dry-run >/dev/null 2>&1 && echo "driver check: loads fine" \

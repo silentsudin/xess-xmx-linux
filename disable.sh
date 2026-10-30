@@ -7,7 +7,8 @@ PFXROOT="${XMX_PREFIX:-${WUWA_PREFIX:-}}"
 # the prefix in whichever Steam library holds the game (SD card, second disk)
 [ -z "$PFXROOT" ] && [ -n "$APPID" ] && PFXROOT="$(steam_prefix_of "$APPID" || printf '%s' "${STEAM_DIR:-$HOME/.local/share/Steam}/steamapps/compatdata/$APPID/pfx")"
 [ -n "$PFXROOT" ] || { echo "Set XMX_APPID=<Steam app id> or XMX_PREFIX=<prefix folder>."; exit 1; }
-PFX="$PFXROOT/drive_c/windows/system32/driverstore/filerepository/igd_faux.inf_1"
+. "$ROOT/tools/system-anv.sh"
+PFX=$(xmx_driverstore_for "$PFXROOT")
 CONF="${XMX_CONF:-$HOME/.config/xess-xmx.conf}"
 GAME="${XMX_GAME:-}"
 if [ -n "$GAME" ] && pgrep -i "^${GAME:0:15}" >/dev/null; then echo "The game is running - close it first."; exit 1; fi

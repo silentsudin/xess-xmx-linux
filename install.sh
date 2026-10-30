@@ -9,6 +9,9 @@
 #   4. a user path unit re-installs the shim whenever a Proton update replaces its bundled copy
 # Re-run after Steam installs a new Proton or after a game created a new prefix. uninstall.sh reverts everything.
 # Environment: XMX_NO_ENV=1 skips step 2 (keep using enable.sh / launch options per game).
+# System mode (tools/system-anv.sh): when the system's own Mesa already has patches/mesa-26.3 (Anatase), step 2 sets
+# only the compiler and vkd3d-proton variables, without VK_DRIVER_FILES, and for the Flatpak org.anatase.Steam through a
+# Flatpak override instead of environment.d.
 set -u
 PKG="$(cd "$(dirname "$0")" && pwd)"
 STEAM="${STEAM_DIR:-$HOME/.local/share/Steam}"
@@ -19,12 +22,17 @@ SYSTOOLS="/usr/share/steam/compatibilitytools.d /usr/local/share/steam/compatibi
 ENVD="$HOME/.config/environment.d"
 UNITD="$HOME/.config/systemd/user"
 SHIM="$PKG/igdext64.dll"
-for f in "$SHIM" "$PKG/lib/libvulkan_intel.so" "$PKG/tools/cm-compile.sh"; do
+. "$PKG/tools/system-anv.sh"
+SYSTEM_ANV=$(xmx_system_anv || true)
+FLATPAK_STEAM=$(xmx_flatpak_steam || true)
+for f in "$SHIM" "$PKG/tools/cm-compile.sh" "${SYSTEM_ANV:-$PKG/lib/libvulkan_intel.so}"; do
   [ -f "$f" ] || { echo "missing $f - run this from the unpacked package"; exit 1; }
 done
 mkdir -p "$PKG/run"
-grep -q "\"library_path\": \"$PKG/lib/libvulkan_intel.so\"" "$PKG/run/intel_icd.json" 2>/dev/null || \
-  printf '{ "ICD": { "api_version": "1.4.348", "library_arch": "64", "library_path": "%s/lib/libvulkan_intel.so" }, "file_format_version": "1.0.1" }\n' "$PKG" > "$PKG/run/intel_icd.json"
+if [ -z "$SYSTEM_ANV" ]; then
+  grep -q "\"library_path\": \"$PKG/lib/libvulkan_intel.so\"" "$PKG/run/intel_icd.json" 2>/dev/null || \
+    printf '{ "ICD": { "api_version": "1.4.348", "library_arch": "64", "library_path": "%s/lib/libvulkan_intel.so" }, "file_format_version": "1.0.1" }\n' "$PKG" > "$PKG/run/intel_icd.json"
+fi
 
 # 1. compiler bundle
 if [ ! -x "$(ls "$PKG"/igc/neo/bin/ocloc* 2>/dev/null | head -1)" ]; then
@@ -39,7 +47,32 @@ fi
 chmod +x "$PKG"/tools/*.sh "$PKG"/tools/*.py 2>/dev/null
 
 # 2. session environment
-if [ "${XMX_NO_ENV:-0}" != 1 ]; then
+if [ "${XMX_NO_ENV:-0}" != 1 ] && [ -n "$SYSTEM_ANV" ]; then
+  # system mode: every Vulkan program already runs the patched ANV; games only need the compiler helper and the
+  # vkd3d-proton / driconf settings. An earlier non-system install's VK_DRIVER_FILES would pick the package's drivers.
+  rm -f "$ENVD/50-xess-xmx.conf"
+  # shellcheck disable=SC2086
+  systemctl --user unset-environment $XMX_ENV_KEYS 2>/dev/null
+  if [ -n "$FLATPAK_STEAM" ]; then
+    xmx_flatpak_env_clear "$FLATPAK_STEAM"
+    args=(); while IFS= read -r kv; do args+=("--env=$kv"); done < <(xmx_system_env "$PKG")
+    flatpak override --user "${args[@]}" "$FLATPAK_STEAM"
+    echo "== environment: Flatpak override for $FLATPAK_STEAM (applies at the next Steam start)"
+    fanv=$(xmx_flatpak_anv "$FLATPAK_STEAM" || true)
+    if [ -n "$fanv" ] && ! grep -aq ANV_CM_HELPER "$fanv"; then
+      echo "!! $FLATPAK_STEAM's runtime still has a Mesa without patches/mesa-26.3 ($fanv): its games run XeSS"
+      echo "   on DP4a until the runtime carries the patched Mesa too (Anatase: oxp3-anatase-fixes)."
+    fi
+  else
+    mkdir -p "$ENVD"
+    { echo "# XeSS XMX (xess-xmx-linux), system mode: the system ANV ($SYSTEM_ANV) has the CM kernel injection"
+      xmx_system_env "$PKG"; } > "$ENVD/50-xess-xmx.conf"
+    # shellcheck disable=SC2046
+    systemctl --user set-environment $(xmx_system_env "$PKG") 2>/dev/null
+    echo "== environment: $ENVD/50-xess-xmx.conf (applies to Steam after a reboot / re-login)"
+  fi
+  echo "   Vulkan driver: the system's ($SYSTEM_ANV)"
+elif [ "${XMX_NO_ENV:-0}" != 1 ]; then
   # VK_DRIVER_FILES replaces the loader's driver list: every other GPU's driver stays in it (hybrid laptops, eGPUs),
   # only the stock 64-bit Intel ANV is left out so that a game cannot pick it instead of the patched one
   drivers="$PKG/run/intel_icd.json"
@@ -75,6 +108,10 @@ fi
 if [ -d "$HOME/.var/app/com.valvesoftware.Steam" ]; then
   echo "!! Flatpak Steam found: its games see neither ~/.config/environment.d nor this folder (sandbox)."
   echo "   install.sh only covers the native Steam (SteamOS, distribution package)."
+fi
+if [ -n "$FLATPAK_STEAM" ] && [ -z "$SYSTEM_ANV" ]; then
+  echo "!! $FLATPAK_STEAM: Flatpak drops VK_DRIVER_FILES and its games load the runtime's Mesa, so the package's"
+  echo "   drivers cannot reach them. Build the system Mesa with patches/mesa-26.3 (system mode, tools/system-anv.sh)."
 fi
 
 # 3. shim
@@ -149,15 +186,28 @@ shim_pass() { # every Proton that bundles the library, and every prefix that has
   done
   # prefixes in every library
   while IFS= read -r lib; do
-    for d in "$lib"/steamapps/compatdata/*/pfx/drive_c/windows/system32/driverstore/filerepository/igd_faux.inf_1; do
-      [ -d "$d" ] || continue
-      if [ -f "$d/igdext64.dll" ]; then install_shim "$d/igdext64.dll"; else cp "$SHIM" "$d/igdext64.dll" && n=$((n + 1)) && echo "   shim -> $d/igdext64.dll"; fi
-      install_controllib "${d%/driverstore/filerepository/igd_faux.inf_1}"
+    for pfx in "$lib"/steamapps/compatdata/*/pfx; do
+      # Proton creates DriverStore/FileRepository; older prefixes may have it in lower case
+      while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        if [ -f "$d/igdext64.dll" ]; then install_shim "$d/igdext64.dll"; else cp "$SHIM" "$d/igdext64.dll" && n=$((n + 1)) && echo "   shim -> $d/igdext64.dll"; fi
+      done < <(xmx_driverstores "$pfx")
+      [ -n "$(xmx_driverstores "$pfx")" ] && install_controllib "$pfx/drive_c/windows/system32"
     done
   done <<< "$LIBS"
 }
 shim_pass
 echo "== shim: $n file(s) updated"
+# Protons without a bundled igdext never load the shim (XeSS stays on DP4a in games that use them)
+noigd=""
+while IFS= read -r lib; do
+  for p in "$lib"/steamapps/common/Proton* "$STEAM"/compatibilitytools.d/*; do
+    [ -f "$p/proton" ] || continue
+    [ -f "$p/files/lib/wine/igdext/x86_64-windows/igdext64.dll" ] || noigd="$noigd
+     ${p##*/}"
+  done
+done <<< "$LIBS"
+[ -n "$noigd" ] && [ "${XMX_WAIT_PREFIX:-0}" = 0 ] && echo "   no igdext (XeSS runs on DP4a in their games):$(printf '%s' "$noigd" | sort -u)"
 if [ -n "$READONLY" ] && [ "${XMX_WAIT_PREFIX:-0}" = 0 ]; then
   echo "!! These Protons belong to a distribution package and only root can change them; games that run on them get"
   echo "   no XMX (Proton copies its own igdext64.dll into the prefix). Either use a Proton in"
@@ -205,7 +255,7 @@ if [ "${XMX_NO_ENV:-0}" != 1 ]; then
   {
     echo "[Unit]"
     echo "Description=Check that the XeSS XMX Vulkan driver loads (falls back to the stock driver if not)"
-    echo "Before=graphical-session-pre.target gamescope-session.service gamescope-session-plus@steam.service steam-launcher.service plasma-workspace.target"
+    echo "Before=graphical-session-pre.target gamescope-session.service gamescope-session-plus@steam.service steam-launcher.service plasma-workspace.target anatase-gamemode.service"
     echo "[Service]"
     echo "Type=oneshot"
     echo "RemainAfterExit=yes"

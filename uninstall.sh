@@ -5,8 +5,12 @@
 set -u
 PKG="$(cd "$(dirname "$0")" && pwd)"
 STEAM="${STEAM_DIR:-$HOME/.local/share/Steam}"
+. "$PKG/tools/system-anv.sh"
 rm -f "$HOME/.config/environment.d/50-xess-xmx.conf"
-systemctl --user unset-environment VK_DRIVER_FILES VKD3D_DISABLE_EXTENSIONS ANV_CM_KERNEL_DIR ANV_CM_HELPER force_vk_vendor 2>/dev/null
+# shellcheck disable=SC2086
+systemctl --user unset-environment $XMX_ENV_KEYS 2>/dev/null
+# system mode with a Flatpak Steam: our variables in its user override
+fs=$(xmx_flatpak_steam || true); [ -n "$fs" ] && xmx_flatpak_env_clear "$fs"
 systemctl --user disable --now xess-xmx-shim.path >/dev/null 2>&1
 systemctl --user disable xess-xmx-check.service >/dev/null 2>&1
 rm -f "$HOME/.config/systemd/user/xess-xmx-shim.path" "$HOME/.config/systemd/user/xess-xmx-shim.service" "$HOME/.config/systemd/user/xess-xmx-check.service"
@@ -31,9 +35,9 @@ for s in "$STEAM/compatibilitytools.d" $SYSTOOLS; do
   for d in "$s"/*/; do remove_hook "${d%/}"; done
 done
 while IFS= read -r lib; do
-  for f in "$lib"/steamapps/common/Proton*/files/lib/wine/igdext/x86_64-windows/igdext64.dll \
-           "$lib"/steamapps/compatdata/*/pfx/drive_c/windows/system32/driverstore/filerepository/igd_faux.inf_1/igdext64.dll; do
-    restore_shim "$f"
+  for f in "$lib"/steamapps/common/Proton*/files/lib/wine/igdext/x86_64-windows/igdext64.dll; do restore_shim "$f"; done
+  for pfx in "$lib"/steamapps/compatdata/*/pfx; do
+    while IFS= read -r d; do [ -n "$d" ] && restore_shim "$d/igdext64.dll"; done < <(xmx_driverstores "$pfx")
   done
   for d in "$lib"/steamapps/common/Proton*/; do remove_hook "${d%/}"; done
   rm -rf "$lib"/steamapps/compatdata/*/pfx/drive_c/igdext_kernels

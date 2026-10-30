@@ -17,10 +17,27 @@ PKG="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="${XMX_CHECK_LIB:-$PKG/lib/mesa-$(cat "$PKG/lib/active" 2>/dev/null)/libvulkan_intel.so}"
 [ -f "$LIB" ] || LIB="$PKG/lib/libvulkan_intel.so"
 ICD="${XMX_CHECK_ICD:-$PKG/run/intel_icd.json}"
+# System mode (tools/system-anv.sh): the system's Mesa has the patches, so check that driver; there is nothing to fall
+# back to and no environment to rewrite
+. "$PKG/tools/system-anv.sh"
+SYSTEM=0
+if [ -z "${XMX_CHECK_LIB:-}" ] && SYS_ANV=$(xmx_system_anv); then
+  SYSTEM=1
+  LIB=$SYS_ANV
+  for j in /usr/share/vulkan/icd.d/intel_icd.x86_64.json /usr/share/vulkan/icd.d/intel_icd.json; do
+    [ -f "$j" ] && { ICD=$j; break; }
+  done
+fi
 STATUS="${XDG_CACHE_HOME:-$HOME/.cache}/xess-xmx/driver-status"
 mkdir -p "$(dirname "$STATUS")"
 
 fail() { # <reason>
+  if [ "$SYSTEM" = 1 ]; then
+    echo "FAILED $(date '+%F %T') $LIB (system Mesa): $1" > "$STATUS"
+    echo "the system's patched ANV is unusable ($1)" >&2
+    [ "${DRY:-0}" = 1 ] && exit 1
+    exit 0
+  fi
   # another driver of the package (lib/mesa-<version>/) may still work: use it instead of the stock drivers
   if [ "${DRY:-0}" != 1 ] && [ -z "${XMX_CHECK_LIB:-}" ]; then
     local d v
@@ -73,8 +90,8 @@ hostlib() { # <soname, or an awk regex with -r> -> path of the host's 64-bit lib
     [ -f "$d/$1" ] && { echo "$d/$1"; return; }
   done
 }
-mkdir -p "$PKG/lib/deps"
-for n in $(cat "$PKG"/lib/mesa-*/libvulkan_intel.so 2>/dev/null | grep -aoE 'lib(SPIRV-Tools[A-Za-z-]*|display-info)\.so[.0-9]*' | sort -u); do
+[ "$SYSTEM" = 1 ] || mkdir -p "$PKG/lib/deps"
+[ "$SYSTEM" = 1 ] || for n in $(cat "$PKG"/lib/mesa-*/libvulkan_intel.so 2>/dev/null | grep -aoE 'lib(SPIRV-Tools[A-Za-z-]*|display-info)\.so[.0-9]*' | sort -u); do
   src=$(hostlib "$n")
   [ -z "$src" ] && [ "$n" = libSPIRV-Tools.so ] && src=$(hostlib libSPIRV-Tools-shared.so)
   [ -z "$src" ] && [ "$n" = libSPIRV-Tools.so ] && src=$(hostlib -r '^libSPIRV-Tools-[0-9][^ ]*\.so$')
@@ -114,6 +131,12 @@ fi
 #    (report only; e.g. Wuthering Waves with ray tracing hangs the GPU without them)
 if [ -d /usr/share/drirc.d ] && ! grep -aq '/usr/share/drirc.d' "$LIB"; then
   note="$note (note: this driver does not read /usr/share/drirc.d, so Mesa's per-game workarounds are off - update the package or rebuild with tools/rebuild-driver.sh)"
+fi
+if [ "$SYSTEM" = 1 ] && fs=$(xmx_flatpak_steam); then
+  fanv=$(xmx_flatpak_anv "$fs" || true)
+  if [ -n "$fanv" ] && ! grep -aq ANV_CM_HELPER "$fanv"; then
+    note="$note (note: $fs's runtime Mesa has no CM kernel injection - its games run XeSS on DP4a)"
+  fi
 fi
 echo "ok $(date '+%F %T') $LIB ${ours}${note}" > "$STATUS"
 echo "patched ANV loads and finds the GPU: ${ours}${note}"
