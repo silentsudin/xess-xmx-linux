@@ -78,6 +78,21 @@ Games without `MESA` use the default, which `tools/switch-driver.sh` lists (`*`)
 check before a session (for example after a system update), the other one becomes the default automatically.
 `INTEL_DEBUG=no-jay %command%` runs a game's own shaders on Mesa 26.3 with the old compiler.
 
+### System mode: a distribution Mesa with the patches (Anatase)
+
+If the system's own Mesa is built with `patches/mesa-26.3` (all five), the package's drivers are not used at all:
+`install.sh` / `enable.sh` notice the patched system ANV (`tools/system-anv.sh`) and set only `ANV_CM_HELPER`,
+`VKD3D_DISABLE_EXTENSIONS=VK_EXT_descriptor_buffer,VK_EXT_descriptor_heap` and `force_vk_vendor=0`, without
+`VK_DRIVER_FILES`. Patch 0005 keeps programs outside Wine (the compositor, the desktop) from logging about the missing
+prefix.
+
+This is also the way to a **Flatpak Steam**: Flatpak drops `VK_DRIVER_FILES`, and pressure-vessel takes the graphics
+drivers from the Flatpak runtime. On [Anatase](https://github.com/anatase-org/anatase) the Steam Flatpak
+`org.anatase.Steam` runs on a runtime made from the host's `/usr`, so the patched Mesa has to be in that runtime too
+([oxp3-anatase-fixes](https://github.com/silentsudin/oxp3-anatase-fixes) builds Anatase's Mesa with the patches and puts
+it in both); the variables then go into a user Flatpak override for `org.anatase.Steam` (`uninstall.sh` removes them).
+The package folder must be under the home directory, which the Flatpak and the game's container share.
+
 ### Requirements
 
 * An Intel GPU with XMX on the `xe` or `i915` kernel driver: Xe3 (Panther Lake; tested on an Arc B390), Xe2
